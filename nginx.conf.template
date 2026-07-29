@@ -1,0 +1,58 @@
+# Gal Trans widget — static host.
+#
+# Rendered into /etc/nginx/conf.d/default.conf when the container starts: the
+# nginx image's entrypoint runs envsubst over /etc/nginx/templates/*.template.
+# NGINX_ENVSUBST_FILTER (set in the Dockerfile) limits substitution to WIDGET_*,
+# so nginx's own $uri and friends pass through untouched.
+
+# Cache policy by path. Assets carry a content hash in their filename, so they
+# are immutable forever. Everything else — the two HTML pages and the loader —
+# must stay revalidated: embed.js is auto-updating by design (no SRI), and a
+# stale copy on a host site cannot be fixed from here.
+map $uri $widget_cache_control {
+    default    "no-cache";
+    ~^/assets/ "public, max-age=31536000, immutable";
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    server_tokens off;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # Headers live here, at server level, on purpose: an `add_header` inside a
+    # location REPLACES the whole inherited set, so scattering them across
+    # locations silently drops the CSP from whichever block forgets it.
+    #
+    # frame-ancestors = who may put the widget in an <iframe>. A space-separated
+    # CSP source list, configurable per deployment without a rebuild:
+    #   WIDGET_FRAME_ANCESTORS="'self' https://example.com https://www.example.com"
+    #   WIDGET_FRAME_ANCESTORS="*"    → any site may embed
+    #
+    # Do NOT add X-Frame-Options: it does not understand an allow-list, and
+    # SAMEORIGIN would block the embed outright.
+    add_header Content-Security-Policy "frame-ancestors ${WIDGET_FRAME_ANCESTORS};" always;
+    add_header Cache-Control $widget_cache_control always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # This is NOT an SPA: two independent HTML entry points, no client-side
+    # router. Hence no `try_files ... /index.html` fallback — a wrong path must
+    # 404 instead of silently serving the preview page.
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # The preview page (/) is development-only and marked noindex, but it is
+    # reachable in production. To hide it, uncomment:
+    # location = /          { return 404; }
+    # location = /index.html { return 404; }
+}
