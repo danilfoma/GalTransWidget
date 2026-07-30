@@ -139,6 +139,17 @@ fallback (`try_files … /index.html`); an unknown path should return 404.
    widget. Nothing else — no secret ever belongs in this image, since every
    `VITE_`-prefixed value ends up readable in the browser bundle.
 
+Step 2 is the one that bites. Dokploy's **Static** build type looks like the
+right choice for a static site, but it ignores this `Dockerfile` and generates
+its own four-line one — `FROM nginx:alpine`, `WORKDIR /usr/share/nginx/html/`,
+`COPY nginx.conf /etc/nginx/nginx.conf`, `COPY . .` — which never runs `npm ci`
+or `vite build`. The image then holds the *sources*, `dist/` never exists, and
+the deploy answers **502 Bad Gateway** because the generated config listens on
+80 while the application port is still Dokploy's default 3000. The build log
+tells you which one ran: a correct build starts with
+`FROM node:22-alpine AS builder` and shows two stages; the broken one
+transfers a ~169 B dockerfile and reports four steps.
+
 ## Customization
 
 | What | Where |
