@@ -20,14 +20,14 @@
     return SUPPORTED.indexOf(base) !== -1 ? base : null;
   }
 
-  function resolveLang() {
-    var explicit = normalizeLang(script.getAttribute("data-lang"));
-    if (explicit) return explicit;
+  // First URL path segment: /en, /ro/schedule, /en-US/… — how a localized site
+  // is routed, and the one signal that stays correct across a client-side
+  // navigation. A segment that is not a locale ("/schedule") normalizes to null.
+  function langFromPath() {
+    return normalizeLang(window.location.pathname.split("/")[1]);
+  }
 
-    var docEl = document.documentElement;
-    var htmlLang = normalizeLang(docEl && docEl.getAttribute("lang"));
-    if (htmlLang) return htmlLang;
-
+  function langFromNavigator() {
     var navLangs =
       navigator.languages && navigator.languages.length
         ? navigator.languages
@@ -36,11 +36,24 @@
       var n = normalizeLang(navLangs[i]);
       if (n) return n;
     }
+    return null;
+  }
 
-    return DEFAULT_LANG;
+  // Priority: data-lang (the site saying it outright) → URL path → <html lang>
+  // → browser languages → default.
+  function resolveLang() {
+    var docEl = document.documentElement;
+    return (
+      normalizeLang(script.getAttribute("data-lang")) ||
+      langFromPath() ||
+      normalizeLang(docEl && docEl.getAttribute("lang")) ||
+      langFromNavigator() ||
+      DEFAULT_LANG
+    );
   }
 
   var lang = resolveLang();
+  var lastPathLang = langFromPath();
 
   var SIZES = {
     fab: { w: 96, h: 96 },
@@ -101,6 +114,63 @@
   window.addEventListener("resize", function () {
     apply(currentState);
   });
+
+  // ── Language, kept in sync after load ─────────────────────────────────────
+  // A localized site switches language by navigating (/en → /ro). On a
+  // client-side-routed site that navigation never reloads this iframe, so
+  // without the code below the widget would stay on the language it was created
+  // with. Pushing the new language over postMessage instead of resetting
+  // iframe.src keeps the open panel and the visible conversation intact.
+  var iframeReady = false;
+
+  function sendLang() {
+    if (!iframeReady || !iframe.contentWindow) return;
+    iframe.contentWindow.postMessage(
+      { source: "gal-trans-widget-host", type: "lang", lang: lang },
+      origin,
+    );
+  }
+
+  function syncLang() {
+    var pathLang = langFromPath();
+    // Moving to a *different* localized route is the site changing language on
+    // purpose, so it outranks a data-lang that was set once at load time and may
+    // never be updated afterwards. Otherwise the normal priority order applies.
+    var next = pathLang && pathLang !== lastPathLang ? pathLang : resolveLang();
+    lastPathLang = pathLang;
+    if (next === lang) return;
+    lang = next;
+    sendLang();
+  }
+
+  iframe.addEventListener("load", function () {
+    iframeReady = true;
+    // The iframe resolves its own language from ?lang= on first load, so this
+    // only matters when the URL changed while it was still loading.
+    sendLang();
+  });
+
+  // popstate covers back/forward. pushState/replaceState fire no event of their
+  // own, so they are wrapped — call through first, keep the original return
+  // value, leave the host's router otherwise untouched.
+  window.addEventListener("popstate", syncLang);
+  ["pushState", "replaceState"].forEach(function (name) {
+    var original = history[name];
+    if (typeof original !== "function") return;
+    history[name] = function () {
+      var result = original.apply(this, arguments);
+      syncLang();
+      return result;
+    };
+  });
+
+  // Some sites flip data-lang instead of navigating.
+  if (window.MutationObserver) {
+    new MutationObserver(syncLang).observe(script, {
+      attributes: true,
+      attributeFilter: ["data-lang"],
+    });
+  }
 
   function mount() {
     document.body.appendChild(iframe);

@@ -72,6 +72,12 @@ const LABELS: Record<
 
 const QUICK_ICONS = [SearchIcon, CalendarIcon, TicketIcon, PriceIcon];
 
+// The greeting is the one message the widget wrote itself, so it is the one
+// message that must follow a language change (the host can switch language
+// while the widget is open). Everything else was actually said, in the language
+// it was said in, and is left alone.
+const WELCOME_ID = "welcome";
+
 interface Channel {
   label: string;
   href: string;
@@ -156,7 +162,7 @@ export function ChatWidget({
   const [open, setOpen] = useState(false);
   const [showPeek, setShowPeek] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
-    { id: "welcome", sender: "assistant", text: t.welcome, createdAt: 0 },
+    { id: WELCOME_ID, sender: "assistant", text: t.welcome, createdAt: 0 },
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -290,7 +296,13 @@ export function ChatWidget({
 
           <div className="wgt-scroll flex flex-1 flex-col gap-3.5 overflow-y-auto bg-card px-4 pb-2 pt-4.5">
             {messages.map((m) => (
-              <MessageRow key={m.id} message={m} />
+              <MessageRow
+                key={m.id}
+                // Resolved at render rather than rewritten in state: the
+                // greeting text is derived from the active language, it is not
+                // part of the conversation.
+                message={m.id === WELCOME_ID ? { ...m, text: t.welcome } : m}
+              />
             ))}
             {isTyping && <TypingRow />}
             <div ref={bottomRef} />
