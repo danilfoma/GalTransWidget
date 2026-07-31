@@ -86,6 +86,64 @@ widget_log "channels =$(
   true
 ) (unset ones are hidden)"
 
+# ── 3. Optional /api reverse proxy → /etc/nginx/widget-api.conf ─────────────
+# Set WIDGET_API_UPSTREAM when the platform's router cannot mount the backend on
+# this domain at /api. Serving the API from this origin is what keeps the
+# browser's calls same-origin; cross-origin fails three ways at once (preflight
+# the API answers with 405, missing CORS headers, and its Origin-vs-Host check).
+widget_conf="${WIDGET_NGINX_CONF:-/etc/nginx/widget-api.conf}"
+widget_up="${WIDGET_API_UPSTREAM:-}"
+
+# Accept a bare host[:port] as readily as a full URL.
+case "$widget_up" in
+  "" | http://* | https://*) : ;;
+  *) widget_up="http://$widget_up" ;;
+esac
+while [ "${widget_up%/}" != "$widget_up" ]; do
+  widget_up="${widget_up%/}"
+done
+
+if [ -n "$widget_up" ]; then
+  # Unquoted heredoc: "$widget_up" is expanded by the shell, while nginx's own
+  # variables are escaped so they survive into the config verbatim.
+  {
+    cat >"$widget_conf" <<EOF
+# Generated at container start by docker-entrypoint.d/10-widget-config.envsh
+# from WIDGET_API_UPSTREAM. Do not edit — every restart overwrites it.
+location /api/ {
+    # Docker's embedded DNS, plus proxy_pass through a VARIABLE rather than a
+    # literal: that defers name resolution to request time, so nginx still boots
+    # when the API container happens to start second. A literal upstream that
+    # does not resolve yet is a hard startup failure instead.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set \$widget_api_upstream "$widget_up";
+
+    # \$request_uri carries the original path AND query string, /api prefix
+    # included — the API expects to receive it intact.
+    proxy_pass \$widget_api_upstream\$request_uri;
+
+    proxy_http_version 1.1;
+
+    # Host deliberately stays this domain. The API rejects any request whose
+    # Origin host differs from its Host header, and that check is what stops a
+    # foreign site from calling it — rewriting Host here would switch it off.
+    proxy_set_header Host              \$host;
+    proxy_set_header X-Real-IP         \$remote_addr;
+    proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    # The API sets its own frame-ancestors CSP. This server already sends the
+    # correct one, and two CSP headers would both be enforced.
+    proxy_hide_header Content-Security-Policy;
+}
+EOF
+  } || widget_log "WARNING: could not write $widget_conf"
+  widget_log "api proxy: /api/ -> $widget_up"
+else
+  { : >"$widget_conf"; } || widget_log "WARNING: could not write $widget_conf"
+  widget_log "api proxy: off (WIDGET_API_UPSTREAM unset) — /api/* stays a 404"
+fi
+
 # Sourced, so clean up rather than leaking names into the entrypoint shell.
-unset widget_raw widget_list widget_src widget_root
+unset widget_raw widget_list widget_src widget_root widget_conf widget_up
 unset -f widget_js widget_log

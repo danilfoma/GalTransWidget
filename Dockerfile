@@ -20,6 +20,10 @@
 #     WIDGET_CHANNEL_TELEGRAM  handle/number builds the standard link; a full
 #     WIDGET_CHANNEL_VIBER     https:// value is used verbatim. Unset = that
 #     WIDGET_CHANNEL_FACEBOOK  channel is hidden.
+#     WIDGET_API_UPSTREAM      Optional host:port (or URL) of the backend. When
+#                              set, nginx proxies /api/* to it, keeping the
+#                              browser's calls same-origin without relying on the
+#                              platform's path routing. Unset = /api/* is a 404.
 #
 #   Build arg (needs a rebuild — Vite inlines it into the browser bundle):
 #     VITE_WIDGET_API_URL      leave EMPTY so the widget's /api/* calls stay
@@ -57,7 +61,10 @@ ENV NGINX_ENVSUBST_FILTER="WIDGET_"
 # real value and would shadow the WIDGET_ALLOWED_ORIGINS alias. The executable
 # bit is required: nginx's entrypoint skips files it cannot execute.
 COPY docker-entrypoint.d/10-widget-config.envsh /docker-entrypoint.d/
-RUN chmod +x /docker-entrypoint.d/10-widget-config.envsh
+# The empty include target keeps nginx bootable even if the entrypoint is ever
+# bypassed — `include` on a missing file is a fatal config error.
+RUN chmod +x /docker-entrypoint.d/10-widget-config.envsh \
+    && : >/etc/nginx/widget-api.conf
 
 # Drop nginx's own placeholder pages, then drop in the build.
 RUN rm -f /usr/share/nginx/html/index.html /usr/share/nginx/html/50x.html

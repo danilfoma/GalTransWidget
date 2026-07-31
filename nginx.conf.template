@@ -44,6 +44,17 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
+    # Optional `location /api/` reverse proxy to the backend, written at start-up
+    # by docker-entrypoint.d/10-widget-config.envsh from WIDGET_API_UPSTREAM. The
+    # file is empty unless that variable is set, in which case /api/* is served
+    # from here (404) exactly as before.
+    #
+    # This exists so the bundle's /api/* calls can stay SAME-ORIGIN even when the
+    # backend cannot be mounted on this domain by the platform's own router. Same
+    # origin is not cosmetic: cross-origin costs a preflight the API answers with
+    # 405, CORS headers it does not send, and its Origin-vs-Host abuse check.
+    include /etc/nginx/widget-api.conf;
+
     # This is NOT an SPA: two independent HTML entry points, no client-side
     # router. Hence no `try_files ... /index.html` fallback — a wrong path must
     # 404 instead of silently serving the preview page.

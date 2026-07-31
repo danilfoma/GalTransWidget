@@ -91,11 +91,37 @@ Build the app, host `dist/` on a domain, then add a single line to the host site
 <script src="https://<widget-domain>/embed.js" async></script>
 ```
 
-That is the entire integration. Optionally force a language:
+That is the entire integration.
+
+### Language
+
+Supported: `ro`, `ru`, `en` (default `ro`). `embed.js` picks one in this order:
+
+1. `data-lang` on the script tag — the site saying it outright
+2. the first URL path segment — `/en`, `/ro/schedule`, `/en-US/…`
+3. `<html lang="…">`
+4. `navigator.languages`
+5. `ro`
+
+So a site routed as `/en` and `/ro` needs **no configuration at all**. To force a
+language regardless of the URL:
 
 ```html
 <script src="https://<widget-domain>/embed.js" data-lang="ru" async></script>
 ```
+
+The language also **follows the site after load**. A localized site switches
+language by navigating, and on a client-side-routed site (Next.js and friends)
+that navigation never reloads the iframe — the widget would otherwise stay on the
+language it was born with. `embed.js` watches `popstate`, `history.pushState` /
+`replaceState` and the `data-lang` attribute, then posts the new language into
+the iframe. Nothing reloads, so an open panel and the conversation on screen
+survive the switch; only the greeting is re-rendered in the new language.
+
+A move to a *different* localized route outranks `data-lang`, because a
+`data-lang` written once at page load is exactly what goes stale on a
+client-side navigation. A `data-lang` on a site whose URL carries no locale is
+never overridden.
 
 `public/embed.js` is the only code that runs on the host page. It appends one
 transparent `<iframe>` pointing at `<origin>/embed.html`, fixed to the
@@ -120,6 +146,7 @@ docker run --rm -p 8080:80 gal-trans-widget   # http://localhost:8080/embed.html
 | `WIDGET_CHANNEL_TELEGRAM` | runtime | Username without `@` (`GalTrans8`). |
 | `WIDGET_CHANNEL_VIBER` | runtime | Phone number, international format without `+`. |
 | `WIDGET_CHANNEL_FACEBOOK` | runtime | Messenger handle (`galtrans.md` → `m.me/galtrans.md`). |
+| `WIDGET_API_UPSTREAM` | runtime | Optional. `host:port` (or full URL) of the backend; when set, this image proxies `/api/*` to it so the browser's calls stay same-origin. Unset = `/api/*` is a 404 and the platform's router is expected to handle it. |
 | `VITE_WIDGET_API_URL` | build arg | Base URL for the widget's HTTP calls. Leave empty. |
 
 Every `WIDGET_CHANNEL_*` value is a bare handle — the widget builds the link. To
@@ -138,10 +165,21 @@ Two things decide whether a deployment works:
 **The `/api/*` calls must reach the backend on the same origin.** The bundle
 calls `POST /api/visit`, `GET /api/history` and `POST /api/chat` as relative
 paths. Serving these files alone gives you a widget with no backend — route
-`/api/*` on the widget's domain to the server that answers them. Pointing
-`VITE_WIDGET_API_URL` at another origin instead means the calls become
-cross-origin, which needs CORS on the server and defeats its same-origin abuse
-protection.
+`/api/*` on the widget's domain to the server that answers them. Two ways:
+
+- **the platform's router** — mount the backend on this domain at path `/api`,
+  without stripping the prefix (the API expects to receive `/api/...` intact);
+- **`WIDGET_API_UPSTREAM`** — when the router cannot do that, this image proxies
+  `/api/*` itself to the host:port you give it, over the internal container
+  network.
+
+Do **not** reach for `VITE_WIDGET_API_URL` to point at another origin. That makes
+the calls cross-origin, and they then fail three ways at once: the JSON `POST`s
+need a preflight the API answers with `405` (no `OPTIONS` handler), the responses
+carry no `Access-Control-Allow-Origin`, and the API rejects any request whose
+`Origin` host differs from its `Host` with `403 forbidden_origin`. Note that
+`chat.example.com` and `api.example.com` are *same-site* but not *same-origin* —
+CORS cares about the origin, so sharing a parent domain does not help.
 
 **`frame-ancestors` is what stops other sites embedding the widget.** It is a
 response header, so it is the host's job, not the bundle's — a static host with
