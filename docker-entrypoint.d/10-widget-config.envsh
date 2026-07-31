@@ -1,0 +1,91 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# Widget runtime configuration. Runs at container start, BEFORE nginx's own
+# 20-envsubst-on-templates.sh (the entrypoint walks /docker-entrypoint.d in
+# lexical order).
+#
+# The `.envsh` suffix is load-bearing: nginx's entrypoint SOURCES `*.envsh` and
+# merely LAUNCHES `*.sh` in a subshell. WIDGET_FRAME_ANCESTORS exported below has
+# to survive into the envsubst step, so this file must not be a plain `.sh` —
+# the export would be lost with the subshell and the CSP would render empty.
+#
+# Being sourced also means: no `set -e` / `set -u` (they would apply to the rest
+# of the entrypoint) and no `exit` (it would abort the container).
+#
+# Two jobs:
+#   1. Normalise the embed allow-list. A comma-separated list, trailing slashes,
+#      or the sibling app's variable name (WIDGET_ALLOWED_ORIGINS) are all
+#      accepted. This matters because the failure mode is silent: an unrecognised
+#      spelling reads as "nothing configured", the built-in default applies, and
+#      the widget then refuses to be framed by the very site it was deployed for
+#      — with an error that points at the embedding page, not at this variable.
+#   2. Render /config.js — the contact channel handles the bundle reads on load.
+# ---------------------------------------------------------------------------
+
+widget_log() {
+  [ -n "${NGINX_ENTRYPOINT_QUIET_LOGS:-}" ] || echo "10-widget-config.envsh: $1"
+}
+
+# ── 1. Embed allow-list → Content-Security-Policy: frame-ancestors ──────────
+widget_raw="${WIDGET_FRAME_ANCESTORS:-${WIDGET_ALLOWED_ORIGINS:-}}"
+widget_list=""
+
+# Unquoted expansion on purpose: word splitting collapses any run of spaces,
+# tabs and newlines. Commas become spaces first, so the nginx spelling (spaces)
+# and the Next spelling (commas) of the same list both work.
+for widget_src in $(printf '%s' "$widget_raw" | tr ',' ' '); do
+  # A CSP source expression has no path component, so a copy-pasted
+  # "https://example.com/" must not be treated as a different source.
+  while [ "${widget_src%/}" != "$widget_src" ]; do
+    widget_src="${widget_src%/}"
+  done
+  [ -n "$widget_src" ] && widget_list="$widget_list $widget_src"
+done
+
+widget_list="${widget_list# }"
+
+# The default lives here rather than as an ENV in the Dockerfile: an ENV default
+# would be indistinguishable from a real value above, so the
+# WIDGET_ALLOWED_ORIGINS fallback would never be reached.
+[ -n "$widget_list" ] ||
+  widget_list="'self' https://gal-trans.md https://www.gal-trans.md"
+
+WIDGET_FRAME_ANCESTORS="$widget_list"
+export WIDGET_FRAME_ANCESTORS
+widget_log "frame-ancestors = $WIDGET_FRAME_ANCESTORS"
+
+# ── 2. Contact channels → /config.js ────────────────────────────────────────
+widget_js() {
+  # The value lands inside a double-quoted JS string in a generated file. Strip
+  # what could break out of that string or out of the <script> element itself;
+  # a handle or URL never legitimately contains these.
+  printf '%s' "${1:-}" | tr -d '"\\<>' | tr -d '\r\n'
+}
+
+widget_root="${WIDGET_HTML_ROOT:-/usr/share/nginx/html}"
+
+{
+  cat >"$widget_root/config.js" <<EOF
+/* Generated at container start by docker-entrypoint.d/10-widget-config.envsh.
+   Change the WIDGET_CHANNEL_* environment variables, not this file — every
+   restart overwrites it. An empty value hides that channel in the widget. */
+window.__WIDGET_CONFIG__ = {
+  whatsapp: "$(widget_js "${WIDGET_CHANNEL_WHATSAPP:-}")",
+  telegram: "$(widget_js "${WIDGET_CHANNEL_TELEGRAM:-}")",
+  viber: "$(widget_js "${WIDGET_CHANNEL_VIBER:-}")",
+  facebook: "$(widget_js "${WIDGET_CHANNEL_FACEBOOK:-}")",
+};
+EOF
+} || widget_log "WARNING: could not write $widget_root/config.js"
+
+widget_log "channels =$(
+  [ -n "${WIDGET_CHANNEL_WHATSAPP:-}" ] && printf ' whatsapp'
+  [ -n "${WIDGET_CHANNEL_TELEGRAM:-}" ] && printf ' telegram'
+  [ -n "${WIDGET_CHANNEL_VIBER:-}" ] && printf ' viber'
+  [ -n "${WIDGET_CHANNEL_FACEBOOK:-}" ] && printf ' facebook'
+  true
+) (unset ones are hidden)"
+
+# Sourced, so clean up rather than leaking names into the entrypoint shell.
+unset widget_raw widget_list widget_src widget_root
+unset -f widget_js widget_log

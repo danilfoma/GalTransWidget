@@ -11,7 +11,15 @@
 #   Port = 80, Domain = chat.gal-trans.md at path "/".
 #
 #   Runtime env (takes effect on restart, no rebuild):
-#     WIDGET_FRAME_ANCESTORS   which sites may embed the widget in an <iframe>
+#     WIDGET_FRAME_ANCESTORS   which sites may embed the widget in an <iframe>.
+#                              CSP source list, space- OR comma-separated;
+#                              trailing slashes are tolerated and
+#                              WIDGET_ALLOWED_ORIGINS is accepted as an alias.
+#                              Default: 'self' + the Gal Trans domains.
+#     WIDGET_CHANNEL_WHATSAPP  Contact handles shown in the widget footer. A bare
+#     WIDGET_CHANNEL_TELEGRAM  handle/number builds the standard link; a full
+#     WIDGET_CHANNEL_VIBER     https:// value is used verbatim. Unset = that
+#     WIDGET_CHANNEL_FACEBOOK  channel is hidden.
 #
 #   Build arg (needs a rebuild — Vite inlines it into the browser bundle):
 #     VITE_WIDGET_API_URL      leave EMPTY so the widget's /api/* calls stay
@@ -42,8 +50,14 @@ FROM nginx:1.27-alpine AS runner
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 ENV NGINX_ENVSUBST_FILTER="WIDGET_"
 
-# Default embed allow-list; override per deployment without rebuilding.
-ENV WIDGET_FRAME_ANCESTORS="'self' https://gal-trans.md https://www.gal-trans.md"
+# Sourced by nginx's entrypoint just before the envsubst step: it normalises the
+# embed allow-list (and holds its default), and renders /config.js from the
+# WIDGET_CHANNEL_* variables. The allow-list default deliberately lives in the
+# script, not in an ENV here — an ENV default would be indistinguishable from a
+# real value and would shadow the WIDGET_ALLOWED_ORIGINS alias. The executable
+# bit is required: nginx's entrypoint skips files it cannot execute.
+COPY docker-entrypoint.d/10-widget-config.envsh /docker-entrypoint.d/
+RUN chmod +x /docker-entrypoint.d/10-widget-config.envsh
 
 # Drop nginx's own placeholder pages, then drop in the build.
 RUN rm -f /usr/share/nginx/html/index.html /usr/share/nginx/html/50x.html

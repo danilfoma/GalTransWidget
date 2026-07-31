@@ -37,7 +37,7 @@ npm run check-types  # tsc --noEmit
 
 ## Configuration
 
-Build-time only, in `.env.local` (see `.env.example`):
+Build-time, in `.env.local` (see `.env.example`):
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -47,6 +47,12 @@ Build-time only, in `.env.local` (see `.env.example`):
 `VITE_`-prefixed values are inlined into the browser bundle — never put a secret
 in one.
 
+Run-time, on the container — `WIDGET_FRAME_ANCESTORS` and `WIDGET_CHANNEL_*`, see
+[Deployment](#deployment). They are read at start-up, so they change with a
+restart and never touch the bundle. There is no local equivalent: in dev the
+contact channels come from the checked-in `public/config.js`, which the
+container regenerates on every start.
+
 ## Project layout
 
 ```
@@ -55,8 +61,11 @@ in one.
 ├── embed.html              iframe page entry
 ├── Dockerfile              production image (Vite build → nginx)
 ├── nginx.conf.template     static host config, rendered at container start
+├── docker-entrypoint.d/
+│   └── 10-widget-config.envsh  start-up: frame-ancestors + config.js
 ├── public/
-│   └── embed.js            the loader pasted on the host site
+│   ├── embed.js            the loader pasted on the host site
+│   └── config.js           runtime config — dev defaults, regenerated in the image
 └── src/
     ├── preview.tsx         mounts the widget over the placeholder background
     ├── embed.tsx           mounts the widget alone, transparent
@@ -67,6 +76,7 @@ in one.
     │   └── icons.tsx           inline SVG icons
     ├── lib/
     │   ├── api.ts          the HTTP calls — the only networking in the app
+    │   ├── config.ts       reads window.__WIDGET_CONFIG__ (contact channels)
     │   ├── locale.ts       language resolution (?lang → navigator → default)
     │   ├── visitor.ts      stable per-browser id, kept in localStorage
     │   └── log.ts          prefixed console logger
@@ -105,8 +115,23 @@ docker run --rm -p 8080:80 gal-trans-widget   # http://localhost:8080/embed.html
 
 | Variable | When | Meaning |
 |---|---|---|
-| `WIDGET_FRAME_ANCESTORS` | runtime | Space-separated list of origins allowed to embed the widget. Default `'self' https://gal-trans.md https://www.gal-trans.md`. `*` allows any site. |
+| `WIDGET_FRAME_ANCESTORS` | runtime | Origins allowed to embed the widget. CSP source list, space- or comma-separated; trailing slashes tolerated; `WIDGET_ALLOWED_ORIGINS` accepted as an alias. Default `'self' https://gal-trans.md https://www.gal-trans.md`. `*` allows any site. |
+| `WIDGET_CHANNEL_WHATSAPP` | runtime | Phone number, international format without `+` (`37360123456`). Unset hides the icon. |
+| `WIDGET_CHANNEL_TELEGRAM` | runtime | Username without `@` (`GalTrans8`). |
+| `WIDGET_CHANNEL_VIBER` | runtime | Phone number, international format without `+`. |
+| `WIDGET_CHANNEL_FACEBOOK` | runtime | Messenger handle (`galtrans.md` → `m.me/galtrans.md`). |
 | `VITE_WIDGET_API_URL` | build arg | Base URL for the widget's HTTP calls. Leave empty. |
+
+Every `WIDGET_CHANNEL_*` value is a bare handle — the widget builds the link. To
+override the link entirely, pass a full `https://…` value and it is used
+verbatim: that is how you point Facebook at a page (`https://facebook.com/name`)
+instead of Messenger. A channel with no value is not rendered at all, so a
+half-configured deployment shows fewer icons rather than dead links.
+
+Both are applied by `docker-entrypoint.d/10-widget-config.envsh` at container
+start: it normalises the allow-list and writes `/config.js`. A restart is
+enough — no rebuild. The effective values are printed in the container log, which
+is the fastest way to confirm a variable actually arrived.
 
 Two things decide whether a deployment works:
 
@@ -136,8 +161,16 @@ fallback (`try_files … /index.html`); an unknown path should return 404.
 4. Add the backend as a second application on the **same domain** at path
    `/api` (no path stripping — it expects to receive `/api/...` intact).
 5. Environment: `WIDGET_FRAME_ANCESTORS` listing the sites that embed the
-   widget. Nothing else — no secret ever belongs in this image, since every
-   `VITE_`-prefixed value ends up readable in the browser bundle.
+   widget, plus any `WIDGET_CHANNEL_*` you want shown. Nothing else — no secret
+   ever belongs in this image, and every `WIDGET_CHANNEL_*` value ends up
+   readable in the browser anyway.
+
+Step 5 has one trap of its own: this is a static nginx image, so it reads *only*
+those variables. Server-side settings that belong to the backend application
+(API keys and URLs, assistant ids, rate-limit knobs) do nothing here — pasting
+them onto this app is harmless but misleading, and the frame-ancestors variable
+hiding among them is easy to misspell. If the widget refuses to be framed, read
+the container log first: it prints the allow-list it actually applied.
 
 Step 2 is the one that bites. Dokploy's **Static** build type looks like the
 right choice for a static site, but it ignores this `Dockerfile` and generates
@@ -156,7 +189,8 @@ transfers a ~169 B dockerfile and reports four steps.
 |---|---|
 | Brand colors, radius, font | `src/styles.css` — the `:root` block |
 | Copy and quick replies (ro / ru / en) | `LABELS` in `src/components/chat-widget.tsx` |
-| Contact channel links | `CHANNELS` in `src/components/chat-widget.tsx` |
+| Contact channel handles | `WIDGET_CHANNEL_*` on the deployment (dev: `public/config.js`) |
+| Contact channel link templates | `buildChannels` in `src/components/chat-widget.tsx` |
 | Iframe sizes | `SIZES` in `public/embed.js` |
 | Mobile full-screen breakpoint | `MOBILE_BP` in `public/embed.js` |
 

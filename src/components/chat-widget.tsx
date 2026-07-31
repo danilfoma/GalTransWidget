@@ -17,6 +17,7 @@ import {
   WhatsAppIcon,
 } from "@/components/icons";
 import { fetchHistory, registerVisit, sendChat } from "@/lib/api";
+import { getRuntimeConfig } from "@/lib/config";
 import { log } from "@/lib/log";
 import { getVisitorId } from "@/lib/visitor";
 import type { ChatMessage, HistoryMessage, WidgetLocale } from "@/types/chat";
@@ -71,12 +72,63 @@ const LABELS: Record<
 
 const QUICK_ICONS = [SearchIcon, CalendarIcon, TicketIcon, PriceIcon];
 
-const CHANNELS: Array<{ label: string; href: string; icon: typeof WhatsAppIcon }> = [
-  { label: "WhatsApp", href: "https://wa.me/", icon: WhatsAppIcon },
-  { label: "Telegram", href: "https://t.me/", icon: TelegramIcon },
-  { label: "Viber", href: "viber://chat", icon: ViberIcon },
-  { label: "Facebook", href: "https://facebook.com/", icon: FacebookIcon },
-];
+interface Channel {
+  label: string;
+  href: string;
+  icon: typeof WhatsAppIcon;
+}
+
+// A handle that already looks like a URL is used verbatim. That is the escape
+// hatch for the cases the templates below cannot express — a Facebook *page*
+// (facebook.com/name) rather than Messenger (m.me/name), a group invite link,
+// a short link.
+function channelHref(handle: string, template: (h: string) => string): string {
+  return /^https?:\/\//i.test(handle) ? handle : template(handle);
+}
+
+// Contact links come from the runtime config (`/config.js`, regenerated from
+// WIDGET_CHANNEL_* every time the container starts), so a deployment sets them
+// with a restart instead of a rebuild. A channel with no configured handle is
+// dropped entirely — a dead `https://t.me/` link is worse than no icon.
+function buildChannels(): Channel[] {
+  const { whatsapp, telegram, viber, facebook } = getRuntimeConfig();
+  const channels: Channel[] = [];
+
+  if (whatsapp) {
+    channels.push({
+      label: "WhatsApp",
+      href: channelHref(whatsapp, (h) => `https://wa.me/${h}`),
+      icon: WhatsAppIcon,
+    });
+  }
+  if (telegram) {
+    channels.push({
+      label: "Telegram",
+      href: channelHref(telegram, (h) => `https://t.me/${h}`),
+      icon: TelegramIcon,
+    });
+  }
+  if (viber) {
+    channels.push({
+      label: "Viber",
+      href: channelHref(viber, (h) => `viber://chat?number=%2B${h}`),
+      icon: ViberIcon,
+    });
+  }
+  if (facebook) {
+    channels.push({
+      label: "Facebook",
+      href: channelHref(facebook, (h) => `https://m.me/${h}`),
+      icon: FacebookIcon,
+    });
+  }
+
+  return channels;
+}
+
+// Evaluated once at module load. `/config.js` is a classic script in the page
+// head, so it has already run by the time this deferred module is evaluated.
+const CHANNELS: Channel[] = buildChannels();
 
 function makeId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -287,25 +339,27 @@ export function ChatWidget({
             </button>
           </form>
 
-          <div className="flex items-center gap-2.5 border-t border-border bg-muted px-4 py-2.5">
-            <span className="whitespace-nowrap text-[11px] text-muted-foreground">
-              {t.social}
-            </span>
-            <span className="ml-auto flex gap-1.5">
-              {CHANNELS.map(({ label, href, icon: Icon }) => (
-                <a
-                  key={label}
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label={label}
-                  className="flex size-[30px] items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:border-brand hover:bg-brand/10 hover:text-brand"
-                >
-                  <Icon className="size-[15px]" />
-                </a>
-              ))}
-            </span>
-          </div>
+          {CHANNELS.length > 0 && (
+            <div className="flex items-center gap-2.5 border-t border-border bg-muted px-4 py-2.5">
+              <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                {t.social}
+              </span>
+              <span className="ml-auto flex gap-1.5">
+                {CHANNELS.map(({ label, href, icon: Icon }) => (
+                  <a
+                    key={label}
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={label}
+                    className="flex size-[30px] items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:border-brand hover:bg-brand/10 hover:text-brand"
+                  >
+                    <Icon className="size-[15px]" />
+                  </a>
+                ))}
+              </span>
+            </div>
+          )}
         </section>
       )}
 
