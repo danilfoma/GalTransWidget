@@ -1,11 +1,17 @@
 import { log } from "@/lib/log";
+import { mapHistoryPayload } from "@/lib/history-map";
 import type {
   AssistantReply,
   ChatRequest,
   ChatResponse,
+  HistoryMessage,
   HistoryResponse,
+  PollConfig,
   WidgetLocale,
 } from "@/types/chat";
+
+/** aichat serves the tail of the conversation; 40 is what its own widget asks for. */
+const HISTORY_LIMIT = 40;
 
 const API_BASE = (import.meta.env.VITE_WIDGET_API_URL ?? "").replace(/\/$/, "");
 
@@ -68,5 +74,45 @@ export async function fetchHistory(visitorId: string): Promise<HistoryResponse> 
       err instanceof Error ? err.message : String(err),
     );
     return { messages: [], source: "none" };
+  }
+}
+
+/**
+ * Re-read the transcript straight from aichat — the only call that leaves this
+ * app's own origin. Returns `null` on any failure, which the caller must NOT
+ * confuse with an empty conversation: a rate-limited or unreachable poll has to
+ * leave the visible thread untouched, while a real empty result is simply
+ * nothing to merge.
+ */
+export async function pollAichatHistory(
+  poll: PollConfig,
+  visitorId: string,
+  signal?: AbortSignal,
+): Promise<HistoryMessage[] | null> {
+  const url =
+    `${poll.apiUrl}/widget/history` +
+    `?widget_id=${encodeURIComponent(poll.widgetId)}` +
+    `&session_id=${encodeURIComponent(visitorId)}` +
+    `&limit=${HISTORY_LIMIT}`;
+
+  try {
+    const res = await fetch(url, {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+      signal,
+    });
+    if (!res.ok) {
+      log.warn("poll: aichat history returned", res.status);
+      return null;
+    }
+    return mapHistoryPayload(await res.json());
+  } catch (err) {
+    // An abort is the component unmounting, not a failure worth logging.
+    if (err instanceof DOMException && err.name === "AbortError") return null;
+    log.warn(
+      "poll: aichat history unreachable —",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
   }
 }

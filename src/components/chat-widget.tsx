@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MessageRow, TypingRow } from "@/components/chat-messages";
 import {
@@ -17,10 +17,17 @@ import {
   WhatsAppIcon,
 } from "@/components/icons";
 import { fetchHistory, registerVisit, sendChat } from "@/lib/api";
+import { useLiveHistory } from "@/lib/use-live-history";
 import { getRuntimeConfig } from "@/lib/config";
 import { log } from "@/lib/log";
 import { getVisitorId } from "@/lib/visitor";
-import type { ChatMessage, HistoryMessage, WidgetLocale } from "@/types/chat";
+import type {
+  ChatMessage,
+  HistoryMessage,
+  PollConfig,
+  TripResult,
+  WidgetLocale,
+} from "@/types/chat";
 
 const LABELS: Record<
   WidgetLocale,
@@ -142,8 +149,9 @@ function makeId(): string {
     : String(Math.round(performance.now() * 1000));
 }
 
-function toChatMessage(h: HistoryMessage): ChatMessage {
-  return { id: makeId(), sender: h.sender, text: h.text, createdAt: h.createdAt };
+/** True when two threads hold the very same message objects, in the same order. */
+function isSameThread(a: ChatMessage[], b: ChatMessage[]): boolean {
+  return a.length === b.length && a.every((message, i) => message === b[i]);
 }
 
 function nowTs(): number {
@@ -167,12 +175,89 @@ export function ChatWidget({
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
 
+  const [visitorId, setVisitorId] = useState("");
+  const [pollConfig, setPollConfig] = useState<PollConfig>();
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const visitorIdRef = useRef<string>("");
 
   useEffect(() => {
     if (open) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping, open]);
+
+  // Fold the server's copy of the conversation into what is on screen. The
+  // server is authoritative, so this runs on every poll — which is exactly why
+  // it must return the SAME array when nothing changed: the scroll effect above
+  // watches `messages`, and a fresh array once a second would drag the thread
+  // down forever.
+  const syncHistory = useCallback((incoming: HistoryMessage[]) => {
+    if (incoming.length === 0) return;
+
+    setMessages((current) => {
+      const welcome = current.find((m) => m.id === WELCOME_ID);
+      const known = new Map(
+        current
+          .filter((m) => m.serverKey !== undefined)
+          .map((m) => [m.serverKey as string, m]),
+      );
+
+      // Keep the existing object whenever the message is unchanged, so an
+      // unchanged poll rebuilds an identical array and React bails out.
+      const server: ChatMessage[] = incoming.map((h) => {
+        const previous = known.get(h.serverKey);
+        if (previous && previous.text === h.text) return previous;
+        return {
+          id: previous?.id ?? makeId(),
+          sender: h.sender,
+          text: h.text,
+          createdAt: h.createdAt,
+          serverKey: h.serverKey,
+        };
+      });
+
+      // Bubbles that live only in this browser. An error notice stays; an
+      // optimistic one disappears once the server echoes it back. Each server
+      // message can absorb at most one, or the same sentence sent twice in a row
+      // would cancel itself out.
+      const absorbed = new Set<string>();
+      const graftedTrips = new Map<string, TripResult[]>();
+
+      const localOnly = current.filter((m) => {
+        if (m.id === WELCOME_ID || m.serverKey !== undefined) return false;
+        if (m.local) return true;
+
+        const match = server.find(
+          (s) =>
+            s.serverKey !== undefined &&
+            !absorbed.has(s.serverKey) &&
+            s.sender === m.sender &&
+            s.text === m.text,
+        );
+        if (!match?.serverKey) return true;
+
+        absorbed.add(match.serverKey);
+        // aichat's transcript carries no trip cards, so move them across from
+        // the reply this bubble came from — otherwise the search results vanish
+        // on the very next poll.
+        if (m.trips?.length && !match.trips?.length) {
+          graftedTrips.set(match.serverKey, m.trips);
+        }
+        return false;
+      });
+
+      const merged = graftedTrips.size
+        ? server.map((s) => {
+            const trips = s.serverKey
+              ? graftedTrips.get(s.serverKey)
+              : undefined;
+            return trips ? { ...s, trips } : s;
+          })
+        : server;
+
+      const next = [...(welcome ? [welcome] : []), ...merged, ...localOnly];
+      return isSameThread(current, next) ? current : next;
+    });
+  }, []);
 
   useEffect(() => {
     const vid = getVisitorId();
@@ -183,18 +268,28 @@ export function ChatWidget({
     let cancelled = false;
     void (async () => {
       const history = await fetchHistory(vid);
-      if (cancelled || history.messages.length === 0) return;
-      const prior = history.messages.map(toChatMessage);
-      setMessages((current) =>
-        current.length <= 1 ? [current[0]!, ...prior] : current,
-      );
-      log.info("init: rehydrated", prior.length, "messages");
+      if (cancelled) return;
+      // Both values the live poll needs, published together once the first read
+      // lands — there is nothing for it to do before that anyway.
+      if (history.poll) setPollConfig(history.poll);
+      setVisitorId(vid);
+      syncHistory(history.messages);
+      log.info("init: rehydrated", history.messages.length, "messages");
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [syncHistory]);
+
+  // Keep the transcript live: an operator who takes over the conversation in
+  // aichat cannot push anything to us, so we re-read it instead.
+  useLiveHistory({
+    poll: pollConfig,
+    visitorId,
+    isOpen: open,
+    onMessages: syncHistory,
+  });
 
   useEffect(() => {
     if (!embedded || typeof window === "undefined" || window.parent === window) {
@@ -238,7 +333,15 @@ export function ChatWidget({
       );
       setMessages((prev) => [
         ...prev,
-        { id: makeId(), sender: "assistant", text: t.error, createdAt: nowTs() },
+        {
+          id: makeId(),
+          sender: "assistant",
+          text: t.error,
+          createdAt: nowTs(),
+          // The server never sends this one, so the live poll must not mistake
+          // it for a stale optimistic bubble and drop it.
+          local: true,
+        },
       ]);
     } finally {
       setIsTyping(false);
